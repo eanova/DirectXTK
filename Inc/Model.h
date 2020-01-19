@@ -25,6 +25,7 @@
 #include <string>
 #include <vector>
 
+#include <malloc.h>
 #include <stdint.h>
 
 #include <wrl\client.h>
@@ -36,6 +37,33 @@ namespace DirectX
     class IEffectFactory;
     class CommonStates;
     class ModelMesh;
+
+    //----------------------------------------------------------------------------------
+    // Frame hierarchy for rigid body and skeletal animation
+    struct ModelBone
+    {
+        ModelBone() noexcept :
+            parentIndex(c_Invalid),
+            childIndex(c_Invalid),
+            siblingIndex(c_Invalid),
+            animIndex(c_Invalid)
+        {}
+
+        uint32_t            parentIndex;
+        uint32_t            childIndex;
+        uint32_t            siblingIndex;
+        uint32_t            animIndex;
+        std::wstring        name;
+
+        using Collection = std::vector<ModelBone>;
+
+        static const uint32_t c_Invalid = uint32_t(-1);
+
+        struct aligned_deleter { void operator()(void* p) noexcept { _aligned_free(p); } };
+
+        using TransformArray = std::unique_ptr<XMMATRIX[], aligned_deleter>;
+    };
+
 
     //----------------------------------------------------------------------------------
     // Each mesh part is a submesh with a single effect
@@ -61,10 +89,14 @@ namespace DirectX
         using Collection = std::vector<std::unique_ptr<ModelMeshPart>>;
 
         // Draw mesh part with custom effect
-        void __cdecl Draw(_In_ ID3D11DeviceContext* deviceContext, _In_ IEffect* ieffect, _In_ ID3D11InputLayout* iinputLayout,
+        void __cdecl Draw(_In_ ID3D11DeviceContext* deviceContext,
+            _In_ IEffect* ieffect,
+            _In_ ID3D11InputLayout* iinputLayout,
             _In_opt_ std::function<void __cdecl()> setCustomState = nullptr) const;
 
-        void __cdecl DrawInstanced(_In_ ID3D11DeviceContext* deviceContext, _In_ IEffect* ieffect, _In_ ID3D11InputLayout* iinputLayout,
+        void __cdecl DrawInstanced(_In_ ID3D11DeviceContext* deviceContext,
+            _In_ IEffect* ieffect,
+            _In_ ID3D11InputLayout* iinputLayout,
             uint32_t instanceCount, uint32_t startInstanceLocation = 0,
             _In_opt_ std::function<void __cdecl()> setCustomState = nullptr) const;
 
@@ -87,6 +119,8 @@ namespace DirectX
         BoundingSphere              boundingSphere;
         BoundingBox                 boundingBox;
         ModelMeshPart::Collection   meshParts;
+        uint32_t                    boneIndex;
+        std::vector<uint32_t>       boneInfluences;
         std::wstring                name;
         bool                        ccw;
         bool                        pmalpha;
@@ -97,8 +131,16 @@ namespace DirectX
         void __cdecl PrepareForRendering(_In_ ID3D11DeviceContext* deviceContext, const CommonStates& states, bool alpha = false, bool wireframe = false) const;
 
         // Draw the mesh
-        void XM_CALLCONV Draw(_In_ ID3D11DeviceContext* deviceContext, FXMMATRIX world, CXMMATRIX view, CXMMATRIX projection,
-                              bool alpha = false, _In_opt_ std::function<void __cdecl()> setCustomState = nullptr) const;
+        void XM_CALLCONV Draw(_In_ ID3D11DeviceContext* deviceContext,
+            FXMMATRIX world, CXMMATRIX view, CXMMATRIX projection,
+            bool alpha = false,
+            _In_opt_ std::function<void __cdecl()> setCustomState = nullptr) const;
+
+        void XM_CALLCONV Draw(_In_ ID3D11DeviceContext* deviceContext,
+            size_t nbones, _In_reads_(nbones) const XMMATRIX* boneTransforms,
+            CXMMATRIX view, CXMMATRIX projection,
+            bool alpha = false,
+            _In_opt_ std::function<void __cdecl()> setCustomState = nullptr) const;
     };
 
 
@@ -109,12 +151,23 @@ namespace DirectX
     public:
         virtual ~Model();
 
-        ModelMesh::Collection   meshes;
-        std::wstring            name;
+        ModelMesh::Collection       meshes;
+        ModelBone::Collection       bones;
+        ModelBone::TransformArray   boneTransforms;
+        std::wstring                name;
 
         // Draw all the meshes in the model
-        void XM_CALLCONV Draw(_In_ ID3D11DeviceContext* deviceContext, const CommonStates& states, FXMMATRIX world, CXMMATRIX view, CXMMATRIX projection,
-                              bool wireframe = false, _In_opt_ std::function<void __cdecl()> setCustomState = nullptr) const;
+        void XM_CALLCONV Draw(_In_ ID3D11DeviceContext* deviceContext,
+            const CommonStates& states,
+            FXMMATRIX world, CXMMATRIX view, CXMMATRIX projection,
+            bool wireframe = false,
+            _In_opt_ std::function<void __cdecl()> setCustomState = nullptr) const;
+
+        void XM_CALLCONV Draw(_In_ ID3D11DeviceContext* deviceContext,
+            const CommonStates& states,
+            CXMMATRIX view, CXMMATRIX projection,
+            bool wireframe = false,
+            _In_opt_ std::function<void __cdecl()> setCustomState = nullptr) const;
 
         // Notify model that effects, parts list, or mesh list has changed
         void __cdecl Modified() noexcept { mEffectCache.clear(); }
@@ -123,22 +176,39 @@ namespace DirectX
         void __cdecl UpdateEffects(_In_ std::function<void __cdecl(IEffect*)> setEffect);
 
         // Loads a model from a Visual Studio Starter Kit .CMO file
-        static std::unique_ptr<Model> __cdecl CreateFromCMO(_In_ ID3D11Device* d3dDevice, _In_reads_bytes_(dataSize) const uint8_t* meshData, size_t dataSize,
-                                                            _In_ IEffectFactory& fxFactory, bool ccw = true, bool pmalpha = false);
-        static std::unique_ptr<Model> __cdecl CreateFromCMO(_In_ ID3D11Device* d3dDevice, _In_z_ const wchar_t* szFileName,
-                                                            _In_ IEffectFactory& fxFactory, bool ccw = true, bool pmalpha = false);
+        static std::unique_ptr<Model> __cdecl CreateFromCMO(_In_ ID3D11Device* d3dDevice,
+            _In_reads_bytes_(dataSize) const uint8_t* meshData, size_t dataSize,
+            _In_ IEffectFactory& fxFactory,
+            bool ccw = true, bool pmalpha = false);
+        static std::unique_ptr<Model> __cdecl CreateFromCMO(_In_ ID3D11Device* d3dDevice,
+            _In_z_ const wchar_t* szFileName,
+            _In_ IEffectFactory& fxFactory,
+            bool ccw = true, bool pmalpha = false);
 
         // Loads a model from a DirectX SDK .SDKMESH file
-        static std::unique_ptr<Model> __cdecl CreateFromSDKMESH(_In_ ID3D11Device* d3dDevice, _In_reads_bytes_(dataSize) const uint8_t* meshData, _In_ size_t dataSize,
-                                                                _In_ IEffectFactory& fxFactory, bool ccw = false, bool pmalpha = false);
-        static std::unique_ptr<Model> __cdecl CreateFromSDKMESH(_In_ ID3D11Device* d3dDevice, _In_z_ const wchar_t* szFileName,
-                                                                _In_ IEffectFactory& fxFactory, bool ccw = false, bool pmalpha = false);
+        static std::unique_ptr<Model> __cdecl CreateFromSDKMESH(_In_ ID3D11Device* d3dDevice,
+            _In_reads_bytes_(dataSize) const uint8_t* meshData, _In_ size_t dataSize,
+            _In_ IEffectFactory& fxFactory,
+            bool ccw = false, bool pmalpha = false);
+        static std::unique_ptr<Model> __cdecl CreateFromSDKMESH(_In_ ID3D11Device* d3dDevice,
+            _In_z_ const wchar_t* szFileName,
+            _In_ IEffectFactory& fxFactory,
+            bool ccw = false, bool pmalpha = false);
 
         // Loads a model from a .VBO file
-        static std::unique_ptr<Model> __cdecl CreateFromVBO(_In_ ID3D11Device* d3dDevice, _In_reads_bytes_(dataSize) const uint8_t* meshData, _In_ size_t dataSize,
-                                                            _In_opt_ std::shared_ptr<IEffect> ieffect = nullptr, bool ccw = false, bool pmalpha = false);
-        static std::unique_ptr<Model> __cdecl CreateFromVBO(_In_ ID3D11Device* d3dDevice, _In_z_ const wchar_t* szFileName,
-                                                            _In_opt_ std::shared_ptr<IEffect> ieffect = nullptr, bool ccw = false, bool pmalpha = false);
+        static std::unique_ptr<Model> __cdecl CreateFromVBO(_In_ ID3D11Device* d3dDevice,
+            _In_reads_bytes_(dataSize) const uint8_t* meshData, _In_ size_t dataSize,
+            _In_opt_ std::shared_ptr<IEffect> ieffect = nullptr,
+            bool ccw = false, bool pmalpha = false);
+        static std::unique_ptr<Model> __cdecl CreateFromVBO(_In_ ID3D11Device* d3dDevice,
+            _In_z_ const wchar_t* szFileName,
+            _In_opt_ std::shared_ptr<IEffect> ieffect = nullptr,
+            bool ccw = false, bool pmalpha = false);
+
+        // Frame hierarchy model bone computation functions (if present)
+        void CopyAbsoluteBoneTransformsTo(size_t nbones, _Out_writes_(nbones) XMMATRIX* transform);
+        void CopyBoneTransformsFrom(size_t nbones, _In_reads_(nbones) const XMMATRIX* transform);
+        void CopyBoneTransformsTo(size_t nbones, _Out_writes_(nbones) XMMATRIX* transform);
 
     private:
         std::set<IEffect*>  mEffectCache;
